@@ -2,10 +2,12 @@ package com.aeromock.gps.service
 
 import android.annotation.SuppressLint
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.location.Location
 import android.location.LocationManager
 import android.location.provider.ProviderProperties
@@ -13,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.aeromock.gps.AeroMockApp
 import com.aeromock.gps.MainActivity
 import com.aeromock.gps.data.GeoMath
@@ -53,6 +56,9 @@ class MockLocationService : Service() {
     private lateinit var fusedClient: FusedLocationProviderClient
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var mockJob: Job? = null
+
+    private val activeProviders = mutableListOf<String>()
+    private var fusedMockActive = false
 
     private var routePoints: List<GeoPointData> = emptyList()
     private var routeIndex = 0
@@ -124,11 +130,20 @@ class MockLocationService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun setupTestProviders() {
-        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-        for (provider in providers) {
+    private fun setupTestProviders(): Boolean {
+        activeProviders.clear()
+        val candidates = buildList {
+            add(LocationManager.GPS_PROVIDER)
+            add(LocationManager.NETWORK_PROVIDER)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(LocationManager.FUSED_PROVIDER)
+            }
+        }
+
+        var lastSecurityError: String? = null
+        for (provider in candidates) {
             runCatching { locationManager.removeTestProvider(provider) }
-            runCatching {
+            try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     locationManager.addTestProvider(
                         provider,
@@ -146,17 +161,59 @@ class MockLocationService : Service() {
                     )
                 }
                 locationManager.setTestProviderEnabled(provider, true)
+                activeProviders.add(provider)
+            } catch (se: SecurityException) {
+                lastSecurityError = "Нет разрешения Mock Location: выбери AeroMock GPS в 'Для разработчиков -> Фиктивные местоположения'"
+            } catch (_: Throwable) {
             }
         }
-        runCatching { fusedClient.setMockMode(true) }
+
+        fusedClient.setMockMode(true)
+            .addOnSuccessListener { fusedMockActive = true }
+            .addOnFailureListener { e ->
+                fusedMockActive = false
+                if (lastSecurityError == null) {
+                    SpoofStateHolder.updateState {
+                        it.copy(lastError = "FusedLocation mock: ${e.localizedMessage}")
+                    }
+                }
+            }
+
+        if (activeProviders.isEmpty()) {
+            SpoofStateHolder.updateState {
+                it.copy(
+                    isRunning = false,
+                    lastError = lastSecurityError ?: "Не удалось зарегистрировать TestProvider"
+                )
+            }
+            return false
+        }
+
+        SpoofStateHolder.updateState { it.copy(lastError = null) }
+        return true
     }
 
     private fun startSpoofing(lat: Double, lon: Double) {
-        setupTestProviders()
-        SpoofStateHolder.updateState {
-            it.copy(isRunning = true, isPaused = false, currentLat = lat, currentLon = lon)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIF_ID,
+                buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(NOTIF_ID, buildNotification())
         }
-        startForeground(NOTIF_ID, buildNotification())
+
+        if (!setupTestProviders()) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
+        SpoofStateHolder.updateState {
+            it.copy(isRunning = true, isPaused = false, currentLat = lat, currentLon = lon, lastError = null)
+        }
 
         mockJob?.cancel()
         mockJob = serviceScope.launch {
@@ -171,7 +228,6 @@ class MockLocationService : Service() {
                     var bearing = state.currentBearing
                     var speedMps = 0f
 
-                    // 1. Joystick movement
                     val (jx, jy) = SpoofStateHolder.joystickVector.value
                     val mag = hypot(jx, jy)
                     if (mag > 0.08f) {
@@ -179,13 +235,12 @@ class MockLocationService : Service() {
                         val actualSpeed = maxSpeedMps * mag.coerceAtMost(1f)
                         speedMps = actualSpeed.toFloat()
                         val dEast = (jx / mag) * actualSpeed * dtSec
-                        val dNorth = (-jy / mag) * actualSpeed * dtSec // screen Y is down
+                        val dNorth = (-jy / mag) * actualSpeed * dtSec
                         val moved = GeoMath.moveByMeters(nextLat, nextLon, dNorth, dEast)
                         nextLat = moved.first
                         nextLon = moved.second
                         bearing = ((Math.toDegrees(atan2(dEast, dNorth)) + 360.0) % 360.0).toFloat()
                     } else if (state.isRoutePlaying && routePoints.size >= 2) {
-                        // 2. Route simulation
                         val target = routePoints.getOrNull(routeIndex + routeDirection)
                         if (target != null) {
                             val dist = GeoMath.distanceMeters(nextLat, nextLon, target.latitude, target.longitude)
@@ -232,7 +287,6 @@ class MockLocationService : Service() {
                         )
                     }
 
-                    // 3. Apply subtle drift if enabled
                     var injectLat = nextLat
                     var injectLon = nextLon
                     if (settings.enableDrift && settings.driftRadiusMeters > 0f) {
@@ -262,39 +316,58 @@ class MockLocationService : Service() {
     ) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
-        for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
-            val loc = Location(provider).apply {
-                latitude = lat
-                longitude = lon
-                altitude = alt
-                this.accuracy = accuracy
-                this.bearing = bearing
-                this.speed = speed
-                time = now
-                elapsedRealtimeNanos = elapsed
+        for (provider in activeProviders) {
+            val loc = createMockLocation(provider, lat, lon, alt, accuracy, bearing, speed, now, elapsed)
+            try {
+                locationManager.setTestProviderLocation(provider, loc)
+            } catch (e: SecurityException) {
+                SpoofStateHolder.updateState {
+                    it.copy(lastError = "Сбой спуфинга ($provider): ${e.localizedMessage}")
+                }
+            } catch (_: Throwable) {
             }
-            runCatching { locationManager.setTestProviderLocation(provider, loc) }
         }
-        val fusedLoc = Location(LocationManager.GPS_PROVIDER).apply {
-            latitude = lat
-            longitude = lon
-            altitude = alt
-            this.accuracy = accuracy
-            this.bearing = bearing
-            this.speed = speed
-            time = now
-            elapsedRealtimeNanos = elapsed
+        if (fusedMockActive) {
+            val fusedLoc = createMockLocation(LocationManager.GPS_PROVIDER, lat, lon, alt, accuracy, bearing, speed, now, elapsed)
+            fusedClient.setMockLocation(fusedLoc)
         }
-        runCatching { fusedClient.setMockLocation(fusedLoc) }
+    }
+
+    private fun createMockLocation(
+        provider: String,
+        lat: Double,
+        lon: Double,
+        alt: Double,
+        accuracy: Float,
+        bearing: Float,
+        speed: Float,
+        timeMs: Long,
+        elapsedNanos: Long
+    ): Location = Location(provider).apply {
+        latitude = lat
+        longitude = lon
+        altitude = alt
+        this.accuracy = accuracy.coerceAtLeast(1f)
+        this.bearing = bearing
+        this.speed = speed
+        time = timeMs
+        elapsedRealtimeNanos = elapsedNanos
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            verticalAccuracyMeters = 2.0f
+            bearingAccuracyDegrees = 5.0f
+            speedAccuracyMetersPerSecond = 0.5f
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun stopSpoofing() {
         mockJob?.cancel()
-        for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+        for (provider in activeProviders) {
             runCatching { locationManager.removeTestProvider(provider) }
         }
+        activeProviders.clear()
         runCatching { fusedClient.setMockMode(false) }
+        fusedMockActive = false
         SpoofStateHolder.updateState {
             it.copy(isRunning = false, isPaused = false, isRoutePlaying = false, currentSpeedMps = 0f)
         }
@@ -338,7 +411,7 @@ class MockLocationService : Service() {
     }
 
     private fun updateNotification() {
-        val manager = getSystemService(android.app.NotificationManager::class.java)
+        val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIF_ID, buildNotification())
     }
 

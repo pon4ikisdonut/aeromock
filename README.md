@@ -1,6 +1,11 @@
-# AeroMock GPS (Android 8.0 – 17)
+# AeroMock GPS v1.1.0 (Android 8.0 – 17)
 
-Полнофункциональное Android-приложение для GPS-спуфинга на **Kotlin + Jetpack Compose + Material 3 (Dynamic Color)**.
+Android-приложение для GPS-спуфинга на **Kotlin + Jetpack Compose + Material 3 (Dynamic Color)**.
+
+## Что исправлено в v1.1.0
+- Карта OSMDroid зафиксирована (отключено бесконечное повторение мира, добавлен кеш тайлов и lifecycle `onResume`/`onPause`, убран сброс оверлеев при перерисовке).
+- Добавлен `LocationManager.FUSED_PROVIDER` (`"fused"`) + `GPS_PROVIDER` + `NETWORK_PROVIDER` + `FusedLocationProviderClient.setMockMode(true)` с явной диагностикой `SecurityException` и проверкой `AppOpsManager.OPSTR_MOCK_LOCATION`.
+- Добавлено корректное отображение баннера, если приложение ещё не выбрано в *Для разработчиков → Приложение для фиктивных местоположений*.
 
 ## Основные функции
 - **Интерактивная карта (OSMdroid / OpenStreetMap)**: работает без API-ключей, тап по карте ставит пин, долгий тап мгновенно телепортирует.

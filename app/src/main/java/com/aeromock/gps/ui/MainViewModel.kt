@@ -1,9 +1,12 @@
 package com.aeromock.gps.ui
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aeromock.gps.data.SpoofRepository
@@ -40,6 +43,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _joystickEnabled = MutableStateFlow(false)
     val joystickEnabled: StateFlow<Boolean> = _joystickEnabled.asStateFlow()
 
+    private val _mockAllowed = MutableStateFlow(repo.isMockLocationSelected())
+    val mockAllowed: StateFlow<Boolean> = _mockAllowed.asStateFlow()
+
     private val _searchStatus = MutableStateFlow<String?>(null)
     val searchStatus: StateFlow<String?> = _searchStatus.asStateFlow()
 
@@ -47,7 +53,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         SpoofStateHolder.updateSettings(repo.loadSettings())
     }
 
+    fun refreshMockPermissionStatus() {
+        _mockAllowed.value = repo.isMockLocationSelected()
+    }
+
+    fun hasLocationPermission(): Boolean {
+        val ctx = getApplication<Application>()
+        return ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
     fun teleportTo(lat: Double, lon: Double) {
+        refreshMockPermissionStatus()
+        if (!hasLocationPermission()) {
+            SpoofStateHolder.updateState { it.copy(lastError = "Выдай разрешение на геолокацию приложению!") }
+            return
+        }
         val ctx = getApplication<Application>()
         val intent = Intent(ctx, MockLocationService::class.java).apply {
             action = MockLocationService.ACTION_TELEPORT
@@ -115,6 +136,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playRoute(route: SavedRoute) {
+        refreshMockPermissionStatus()
+        if (!hasLocationPermission()) {
+            SpoofStateHolder.updateState { it.copy(lastError = "Выдай разрешение на геолокацию приложению!") }
+            return
+        }
         val ctx = getApplication<Application>()
         val intent = Intent(ctx, MockLocationService::class.java).apply {
             action = MockLocationService.ACTION_START_ROUTE
@@ -164,7 +190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun searchLocation(query: String, onFound: (Double, Double) -> Unit) {
         val trimmed = query.trim()
         val coordParts = trimmed.split(",", " ").mapNotNull { it.trim().toDoubleOrNull() }
-        if (coordParts.size == 2 && coordParts[0] in -90.0..90.0 && coordParts[1] in -180.0..180.0) {
+        if (coordParts.size == 2 && coordParts[0] in -85.0..85.0 && coordParts[1] in -180.0..180.0) {
             onFound(coordParts[0], coordParts[1])
             _searchStatus.value = null
             return
@@ -177,7 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val encoded = URLEncoder.encode(trimmed, "UTF-8")
                     val url = URL("https://nominatim.openstreetmap.org/search?q=$encoded&format=json&limit=1")
                     val conn = (url.openConnection() as HttpURLConnection).apply {
-                        setRequestProperty("User-Agent", "AeroMockGPS/1.0")
+                        setRequestProperty("User-Agent", "AeroMockGPS/1.1")
                         connectTimeout = 5000
                         readTimeout = 5000
                     }

@@ -1,11 +1,9 @@
 package com.aeromock.gps.data
 
+import android.app.AppOpsManager
 import android.content.Context
-import com.aeromock.gps.model.FavoriteLocation
-import com.aeromock.gps.model.GeoPointData
-import com.aeromock.gps.model.SavedRoute
-import com.aeromock.gps.model.SpoofSettings
-import com.aeromock.gps.model.SpoofState
+import android.os.Process
+import com.aeromock.gps.model.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +21,7 @@ object SpoofStateHolder {
     private val _settings = MutableStateFlow(SpoofSettings())
     val settings: StateFlow<SpoofSettings> = _settings.asStateFlow()
 
-    private val _joystickVector = MutableStateFlow(Pair(0f, 0f)) // (dx, dy) normalized [-1..1]
+    private val _joystickVector = MutableStateFlow(Pair(0f, 0f))
     val joystickVector: StateFlow<Pair<Float, Float>> = _joystickVector.asStateFlow()
 
     fun updateState(transform: (SpoofState) -> SpoofState) {
@@ -39,9 +37,21 @@ object SpoofStateHolder {
     }
 }
 
-class SpoofRepository(context: Context) {
+class SpoofRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("aeromock_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
+
+    fun isMockLocationSelected(): Boolean {
+        return runCatching {
+            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = appOps.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_MOCK_LOCATION,
+                Process.myUid(),
+                context.packageName
+            )
+            mode == AppOpsManager.MODE_ALLOWED
+        }.getOrDefault(false)
+    }
 
     fun loadFavorites(): List<FavoriteLocation> {
         val json = prefs.getString("favorites", null) ?: return defaultFavorites()
@@ -122,7 +132,7 @@ object GeoMath {
         val dLat = dNorthMeters / EARTH_RADIUS_M
         val dLon = dEastMeters / (EARTH_RADIUS_M * cos(Math.toRadians(lat)))
         return Pair(
-            (lat + Math.toDegrees(dLat)).coerceIn(-89.999, 89.999),
+            (lat + Math.toDegrees(dLat)).coerceIn(-85.0, 85.0),
             ((lon + Math.toDegrees(dLon) + 540.0) % 360.0) - 180.0
         )
     }

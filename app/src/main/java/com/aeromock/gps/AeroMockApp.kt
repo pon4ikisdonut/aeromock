@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import org.osmdroid.config.Configuration
+import java.io.File
 
 class AeroMockApp : Application() {
     companion object {
@@ -13,7 +14,10 @@ class AeroMockApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        Configuration.getInstance().userAgentValue = packageName
+        val osmdroidConfig = Configuration.getInstance()
+        osmdroidConfig.userAgentValue = "$packageName/1.1"
+        osmdroidConfig.osmdroidBasePath = File(filesDir, "osmdroid").apply { mkdirs() }
+        osmdroidConfig.osmdroidTileCache = File(cacheDir, "osmdroid/tiles").apply { mkdirs() }
         createNotificationChannel()
     }
 

@@ -20,9 +20,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aeromock.gps.model.LoopMode
 import com.aeromock.gps.model.SpeedPreset
@@ -55,29 +58,44 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AeroMockRoot(vm: MainViewModel = viewModel()) {
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val state by vm.spoofState.collectAsState()
     val settings by vm.settings.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val routes by vm.routes.collectAsState()
     val draftPoints by vm.draftRoutePoints.collectAsState()
     val joystickOn by vm.joystickEnabled.collectAsState()
+    val mockAllowed by vm.mockAllowed.collectAsState()
     val searchStatus by vm.searchStatus.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchText by remember { mutableStateOf("") }
     var pinLat by remember { mutableDoubleStateOf(state.currentLat) }
     var pinLon by remember { mutableDoubleStateOf(state.currentLon) }
+    var cameraCenterTrigger by remember { mutableStateOf<Pair<Double, Double>?>(null) }
     var routeBuildMode by remember { mutableStateOf(false) }
     var showFavDialog by remember { mutableStateOf(false) }
     var showRouteDialog by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {}
+    ) {
+        vm.refreshMockPermissionStatus()
+    }
 
     val gpxLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { vm.importGpxUri(it) } }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.refreshMockPermissionStatus()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(Unit) {
         val perms = mutableListOf(
@@ -100,7 +118,7 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                             if (state.isRunning) {
                                 val st = if (state.isPaused) "Пауза" else "Спуфинг активен"
                                 "$st • ${String.format("%.5f, %.5f", state.currentLat, state.currentLon)}"
-                            } else "Готов к телепорту",
+                            } else "Пин: ${String.format("%.5f, %.5f", pinLat, pinLon)}",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (state.isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -125,7 +143,11 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                     IconButton(onClick = {
                         ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
                     }) {
-                        Icon(Icons.Default.DeveloperMode, contentDescription = "Dev Options")
+                        Icon(
+                            Icons.Default.DeveloperMode,
+                            contentDescription = "Dev Options",
+                            tint = if (!mockAllowed) MaterialTheme.colorScheme.error else LocalContentColor.current
+                        )
                     }
                 }
             )
@@ -143,6 +165,31 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
             when (selectedTab) {
                 0 -> {
                     Column(Modifier.fillMaxSize()) {
+                        if (!mockAllowed || state.lastError != null) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = state.lastError
+                                            ?: "Выбери AeroMock GPS в 'Для разработчиков -> Приложение для фиктивных местоположений'",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = {
+                                        ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                                    }) {
+                                        Text("Открыть")
+                                    }
+                                }
+                            }
+                        }
+
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -159,6 +206,7 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                                 vm.searchLocation(searchText) { lat, lon ->
                                     pinLat = lat
                                     pinLon = lon
+                                    cameraCenterTrigger = Pair(lat, lon)
                                     vm.teleportTo(lat, lon)
                                 }
                             }) {
@@ -171,51 +219,24 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                         }
 
                         Box(Modifier.weight(1f)) {
-                            AndroidView(
-                                modifier = Modifier.fillMaxSize(),
-                                factory = { context ->
-                                    MapView(context).apply {
-                                        setTileSource(TileSourceFactory.MAPNIK)
-                                        setMultiTouchControls(true)
-                                        controller.setZoom(15.0)
-                                        controller.setCenter(GeoPoint(pinLat, pinLon))
+                            OsmMapContainer(
+                                targetLat = if (state.isRunning) state.currentLat else pinLat,
+                                targetLon = if (state.isRunning) state.currentLon else pinLon,
+                                draftPoints = draftPoints.map { GeoPoint(it.latitude, it.longitude) },
+                                cameraTrigger = cameraCenterTrigger,
+                                onCameraMovedHandled = { cameraCenterTrigger = null },
+                                onTap = { lat, lon ->
+                                    if (routeBuildMode) {
+                                        vm.addDraftPoint(lat, lon)
+                                    } else {
+                                        pinLat = lat
+                                        pinLon = lon
                                     }
                                 },
-                                update = { mapView ->
-                                    mapView.overlays.clear()
-                                    val eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
-                                        override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
-                                            if (routeBuildMode) {
-                                                vm.addDraftPoint(p.latitude, p.longitude)
-                                            } else {
-                                                pinLat = p.latitude
-                                                pinLon = p.longitude
-                                            }
-                                            return true
-                                        }
-                                        override fun longPressHelper(p: GeoPoint): Boolean {
-                                            pinLat = p.latitude
-                                            pinLon = p.longitude
-                                            vm.teleportTo(p.latitude, p.longitude)
-                                            return true
-                                        }
-                                    })
-                                    mapView.overlays.add(eventsOverlay)
-
-                                    if (draftPoints.isNotEmpty()) {
-                                        val line = Polyline().apply {
-                                            setPoints(draftPoints.map { GeoPoint(it.latitude, it.longitude) })
-                                        }
-                                        mapView.overlays.add(line)
-                                    }
-
-                                    val marker = Marker(mapView).apply {
-                                        position = GeoPoint(if (state.isRunning) state.currentLat else pinLat, if (state.isRunning) state.currentLon else pinLon)
-                                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                                        title = "Target GPS"
-                                    }
-                                    mapView.overlays.add(marker)
-                                    mapView.invalidate()
+                                onLongPress = { lat, lon ->
+                                    pinLat = lat
+                                    pinLon = lon
+                                    vm.teleportTo(lat, lon)
                                 }
                             )
 
@@ -262,7 +283,6 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                             }
                         }
 
-                        // Speed presets bar
                         Row(
                             Modifier.fillMaxWidth().padding(8.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly
@@ -310,7 +330,11 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                                             Text(route.name, fontWeight = FontWeight.SemiBold)
                                             Text("${route.points.size} точек • ${route.speedKmh.toInt()} км/ч • ${route.loopMode.label}", style = MaterialTheme.typography.bodySmall)
                                         }
-                                        IconButton(onClick = { vm.playRoute(route) }) { Icon(Icons.Default.PlayArrow, null) }
+                                        IconButton(onClick = {
+                                            vm.playRoute(route)
+                                            route.points.firstOrNull()?.let { cameraCenterTrigger = Pair(it.latitude, it.longitude) }
+                                            selectedTab = 0
+                                        }) { Icon(Icons.Default.PlayArrow, null) }
                                         IconButton(onClick = { vm.deleteRoute(route.id) }) { Icon(Icons.Default.Delete, null) }
                                     }
                                 }
@@ -334,6 +358,7 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                                     IconButton(onClick = {
                                         pinLat = fav.latitude
                                         pinLon = fav.longitude
+                                        cameraCenterTrigger = Pair(fav.latitude, fav.longitude)
                                         vm.teleportTo(fav.latitude, fav.longitude)
                                         selectedTab = 0
                                     }) { Icon(Icons.Default.FlightTakeoff, null) }
@@ -350,7 +375,7 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
                             Text("Телеметрия и реализм", style = MaterialTheme.typography.titleLarge)
                         }
                         item {
-                            Text("Точность (Accuracy): ${settings.accuracyMeters} м")
+                            Text("Точность (Accuracy): ${String.format("%.1f", settings.accuracyMeters)} м")
                             Slider(
                                 value = settings.accuracyMeters,
                                 onValueChange = { vm.updateSettings(settings.copy(accuracyMeters = it)) },
@@ -455,4 +480,92 @@ fun AeroMockRoot(vm: MainViewModel = viewModel()) {
             }
         )
     }
+}
+
+@Composable
+private fun OsmMapContainer(
+    targetLat: Double,
+    targetLon: Double,
+    draftPoints: List<GeoPoint>,
+    cameraTrigger: Pair<Double, Double>?,
+    onCameraMovedHandled: () -> Unit,
+    onTap: (Double, Double) -> Unit,
+    onLongPress: (Double, Double) -> Unit
+) {
+    val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
+
+    val mapView = remember {
+        MapView(ctx).apply {
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(true)
+            isHorizontalMapRepetitionEnabled = false
+            isVerticalMapRepetitionEnabled = false
+            minZoomLevel = 3.0
+            maxZoomLevel = 20.0
+            setScrollableAreaLimitLatitude(
+                MapView.getTileSystem().maxLatitude,
+                MapView.getTileSystem().minLatitude,
+                0
+            )
+            controller.setZoom(15.0)
+            controller.setCenter(GeoPoint(targetLat, targetLon))
+        }
+    }
+
+    val polyline = remember(mapView) {
+        Polyline(mapView).also { mapView.overlays.add(it) }
+    }
+    val marker = remember(mapView) {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            title = "Target GPS"
+        }.also { mapView.overlays.add(it) }
+    }
+
+    DisposableEffect(mapView) {
+        val eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
+                currentOnTap(p.latitude, p.longitude)
+                return true
+            }
+            override fun longPressHelper(p: GeoPoint): Boolean {
+                currentOnLongPress(p.latitude, p.longitude)
+                return true
+            }
+        })
+        mapView.overlays.add(0, eventsOverlay)
+        onDispose { mapView.overlays.remove(eventsOverlay) }
+    }
+
+    DisposableEffect(lifecycleOwner, mapView) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(cameraTrigger) {
+        if (cameraTrigger != null) {
+            mapView.controller.animateTo(GeoPoint(cameraTrigger.first, cameraTrigger.second), 16.0, 450L)
+            onCameraMovedHandled()
+        }
+    }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { mapView },
+        update = { view ->
+            marker.position = GeoPoint(targetLat, targetLon)
+            polyline.setPoints(draftPoints)
+            view.invalidate()
+        }
+    )
 }

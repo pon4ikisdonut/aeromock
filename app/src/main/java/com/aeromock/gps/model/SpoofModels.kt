@@ -43,9 +43,9 @@ enum class SpeedPreset(val label: String, val kmh: Float) {
 data class SpoofSettings(
     val accuracyMeters: Float = 3.5f,
     val altitudeMeters: Double = 48.0,
-    val updateIntervalMs: Long = 500L,
+    val updateIntervalMs: Long = 400L,
     val enableDrift: Boolean = true,
-    val driftRadiusMeters: Float = 2.0f,
+    val driftRadiusMeters: Float = 1.8f,
     val speedKmh: Float = 5f,
     val joystickSizeDp: Float = 136f,
     val joystickAlpha: Float = 0.85f
@@ -55,10 +55,11 @@ data class SpoofState(
     val isRunning: Boolean = false,
     val isPaused: Boolean = false,
     val isRoutePlaying: Boolean = false,
-    val currentLat: Double = 51.5074,
-    val currentLon: Double = -0.1278,
+    val currentLat: Double = 59.3498,
+    val currentLon: Double = 18.0707,
     val currentBearing: Float = 0f,
     val currentSpeedMps: Float = 0f,
     val routeProgress: Float = 0f,
-    val activeRouteName: String? = null
+    val activeRouteName: String? = null,
+    val lastError: String? = null
 )
